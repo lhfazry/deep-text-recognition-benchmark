@@ -10,7 +10,6 @@ from natsort import natsorted
 from PIL import Image
 import numpy as np
 from torch.utils.data import Dataset, ConcatDataset, Subset
-from torch._utils import _accumulate
 import torchvision.transforms as transforms
 
 
@@ -30,7 +29,7 @@ class Batch_Balanced_Dataset(object):
         log.write(f'dataset_root: {opt.train_data}\nopt.select_data: {opt.select_data}\nopt.batch_ratio: {opt.batch_ratio}\n')
         assert len(opt.select_data) == len(opt.batch_ratio)
 
-        _AlignCollate = AlignCollate(imgH=opt.imgH, imgW=opt.imgW, keep_ratio_with_pad=opt.PAD)
+        _AlignCollate = AlignCollate(imgH=opt.imgH, imgW=opt.imgW, keep_ratio_with_pad=opt.PAD, opt=opt)
         self.data_loader_list = []
         self.dataloader_iter_list = []
         batch_size_list = []
@@ -289,10 +288,21 @@ class NormalizePAD(object):
 
 class AlignCollate(object):
 
-    def __init__(self, imgH=32, imgW=100, keep_ratio_with_pad=False):
+    def __init__(self, imgH=32, imgW=100, keep_ratio_with_pad=False, opt=None):
         self.imgH = imgH
         self.imgW = imgW
         self.keep_ratio_with_pad = keep_ratio_with_pad
+        self.data_augmentation = False
+        if opt is not None and hasattr(opt, 'data_augmentation'):
+            self.data_augmentation = opt.data_augmentation
+
+        if self.data_augmentation:
+            self.aug_transforms = transforms.Compose([
+                transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.1),
+                transforms.RandomAffine(degrees=5, translate=(0.02, 0.02), scale=(0.9, 1.1)),
+                transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))], p=0.2)
+            ])
+            self.random_erasing = transforms.RandomErasing(p=0.4, scale=(0.02, 0.1), ratio=(0.3, 3.3), value='random')
 
     def __call__(self, batch):
         batch = filter(lambda x: x is not None, batch)
@@ -305,6 +315,8 @@ class AlignCollate(object):
 
             resized_images = []
             for image in images:
+                if self.data_augmentation:
+                    image = self.aug_transforms(image)
                 w, h = image.size
                 ratio = w / float(h)
                 if math.ceil(self.imgH * ratio) > self.imgW:
@@ -313,14 +325,31 @@ class AlignCollate(object):
                     resized_w = math.ceil(self.imgH * ratio)
 
                 resized_image = image.resize((resized_w, self.imgH), Image.BICUBIC)
-                resized_images.append(transform(resized_image))
+                
+                transformed_tensor = transform(resized_image)
+                if self.data_augmentation:
+                    transformed_tensor = self.random_erasing(transformed_tensor)
+                resized_images.append(transformed_tensor)
                 # resized_image.save('./image_test/%d_test.jpg' % w)
 
             image_tensors = torch.cat([t.unsqueeze(0) for t in resized_images], 0)
 
         else:
             transform = ResizeNormalize((self.imgW, self.imgH))
-            image_tensors = [transform(image) for image in images]
+            
+            aug_images = []
+            for image in images:
+                if self.data_augmentation:
+                    image = self.aug_transforms(image)
+                aug_images.append(image)
+
+            image_tensors = []
+            for image in aug_images:
+                transformed_tensor = transform(image)
+                if self.data_augmentation:
+                    transformed_tensor = self.random_erasing(transformed_tensor)
+                image_tensors.append(transformed_tensor)
+
             image_tensors = torch.cat([t.unsqueeze(0) for t in image_tensors], 0)
 
         return image_tensors, labels
@@ -337,3 +366,17 @@ def tensor2im(image_tensor, imtype=np.uint8):
 def save_image(image_numpy, image_path):
     image_pil = Image.fromarray(image_numpy)
     image_pil.save(image_path)
+
+def _accumulate(iterable, fn=lambda x, y: x + y):
+    "Return running totals"
+    # _accumulate([1,2,3,4,5]) --> 1 3 6 10 15
+    # _accumulate([1,2,3,4,5], operator.mul) --> 1 2 6 24 120
+    it = iter(iterable)
+    try:
+        total = next(it)
+    except StopIteration:
+        return
+    yield total
+    for element in it:
+        total = fn(total, element)
+        yield total

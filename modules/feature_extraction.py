@@ -1,6 +1,6 @@
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 
 class VGG_FeatureExtractor(nn.Module):
     """ FeatureExtractor of CRNN (https://arxiv.org/pdf/1507.05717.pdf) """
@@ -244,3 +244,194 @@ class ResNet(nn.Module):
         x = self.relu(x)
 
         return x
+
+class SEBlock(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(SEBlock, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel // reduction, channel, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
+
+class CustomAttentionCNN(nn.Module):
+    '''
+    Arsitektur khusus: CNN + Squeeze-and-Excitation Attention
+    Didesain untuk mempertahankan fitur angka dan menekan noise background.
+    '''
+    def __init__(self, input_channel, output_channel=512):
+        super(CustomAttentionCNN, self).__init__()
+
+        # Konfigurasi stride untuk mereduksi tinggi(H) menjadi 1, dan menjaga lebar(W)
+        self.ConvNet = nn.Sequential(
+            nn.Conv2d(input_channel, 64, 3, 1, 1), nn.ReLU(True),
+            nn.MaxPool2d(2, 2), # H/2, W/2
+
+            nn.Conv2d(64, 128, 3, 1, 1), nn.BatchNorm2d(128), nn.ReLU(True),
+            SEBlock(128), # Attention Block
+            nn.MaxPool2d(2, 2), # H/4, W/4
+
+            nn.Conv2d(128, 256, 3, 1, 1), nn.BatchNorm2d(256), nn.ReLU(True),
+            SEBlock(256), # Attention Block
+            nn.Conv2d(256, 256, 3, 1, 1), nn.ReLU(True),
+            nn.MaxPool2d((2, 1), (2, 1)), # H/8, W/4 (Lebar dipertahankan)
+
+            nn.Conv2d(256, 512, 3, 1, 1, bias=False), nn.BatchNorm2d(512), nn.ReLU(True),
+            SEBlock(512), # Attention Block
+            nn.Conv2d(512, 512, 3, 1, 1, bias=False), nn.BatchNorm2d(512), nn.ReLU(True),
+            nn.MaxPool2d((2, 1), (2, 1)), # H/16, W/4
+
+            nn.Conv2d(512, output_channel, 2, 1, 0), nn.BatchNorm2d(output_channel), nn.ReLU(True)
+            # Output H akan menjadi 1 jika input H adalah 32. Jika input 64, butuh satu pool lagi.
+        )
+
+        # Penyesuaian khusus jika menggunakan input imgH=64
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((1, None))
+
+    def forward(self, input):
+        conv = self.ConvNet(input)
+        # Paksa Height menjadi 1 berapapun resolusi inputnya
+        conv = self.adaptive_pool(conv)
+        return conv
+
+
+class ChannelAttention(nn.Module):
+    def __init__(self, in_planes, ratio=16):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+
+        self.fc1   = nn.Conv2d(in_planes, in_planes // ratio, 1, bias=False)
+        self.relu1 = nn.ReLU()
+        self.fc2   = nn.Conv2d(in_planes // ratio, in_planes, 1, bias=False)
+
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = self.fc2(self.relu1(self.fc1(self.avg_pool(x))))
+        max_out = self.fc2(self.relu1(self.fc1(self.max_pool(x))))
+        out = avg_out + max_out
+        return self.sigmoid(out)
+
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding = 3 if kernel_size == 7 else 1
+
+        self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        x = torch.cat([avg_out, max_out], dim=1)
+        x = self.conv1(x)
+        return self.sigmoid(x)
+
+class CBAMBlock(nn.Module):
+    def __init__(self, channel, reduction=16, spatial_kernel=7):
+        super(CBAMBlock, self).__init__()
+        self.ca = ChannelAttention(channel, ratio=reduction)
+        self.sa = SpatialAttention(kernel_size=spatial_kernel)
+
+    def forward(self, x):
+        x = x * self.ca(x)
+        x = x * self.sa(x)
+        return x
+
+class CustomCBAMCNN(nn.Module):
+    '''
+    Alternatif 1: CNN + CBAM (Convolutional Block Attention Module)
+    Didesain dengan Channel dan Spatial Attention untuk menekan noise background dan fokus pada area angka.
+    '''
+    def __init__(self, input_channel, output_channel=512):
+        super(CustomCBAMCNN, self).__init__()
+
+        self.ConvNet = nn.Sequential(
+            nn.Conv2d(input_channel, 64, 3, 1, 1), nn.ReLU(True),
+            nn.MaxPool2d(2, 2), # H/2, W/2
+
+            nn.Conv2d(64, 128, 3, 1, 1), nn.BatchNorm2d(128), nn.ReLU(True),
+            CBAMBlock(128), # CBAM Block
+            nn.MaxPool2d(2, 2), # H/4, W/4
+
+            nn.Conv2d(128, 256, 3, 1, 1), nn.BatchNorm2d(256), nn.ReLU(True),
+            CBAMBlock(256), # CBAM Block
+            nn.Conv2d(256, 256, 3, 1, 1), nn.ReLU(True),
+            nn.MaxPool2d((2, 1), (2, 1)), # H/8, W/4
+
+            nn.Conv2d(256, 512, 3, 1, 1, bias=False), nn.BatchNorm2d(512), nn.ReLU(True),
+            CBAMBlock(512), # CBAM Block
+            nn.Conv2d(512, 512, 3, 1, 1, bias=False), nn.BatchNorm2d(512), nn.ReLU(True),
+            nn.MaxPool2d((2, 1), (2, 1)), # H/16, W/4
+
+            nn.Conv2d(512, output_channel, 2, 1, 0), nn.BatchNorm2d(output_channel), nn.ReLU(True)
+        )
+
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((1, None))
+
+    def forward(self, input):
+        conv = self.ConvNet(input)
+        conv = self.adaptive_pool(conv)
+        return conv
+
+class BasicBlock_CBAM(nn.Module):
+    expansion = 1
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None):
+        super(BasicBlock_CBAM, self).__init__()
+        self.conv1 = self._conv3x3(inplanes, planes)
+        self.bn1 = nn.BatchNorm2d(planes)
+        self.conv2 = self._conv3x3(planes, planes)
+        self.bn2 = nn.BatchNorm2d(planes)
+        self.relu = nn.ReLU(inplace=True)
+        self.cbam = CBAMBlock(planes)
+        self.downsample = downsample
+        self.stride = stride
+
+    def _conv3x3(self, in_planes, out_planes, stride=1):
+        "3x3 convolution with padding"
+        return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
+                         padding=1, bias=False)
+
+    def forward(self, x):
+        residual = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        
+        # apply CBAM
+        out = self.cbam(out)
+
+        if self.downsample is not None:
+            residual = self.downsample(x)
+        out += residual
+        out = self.relu(out)
+
+        return out
+
+class ResNet_CBAM_FeatureExtractor(nn.Module):
+    """ 
+    Alternatif 2: ResNet Feature Extractor dengan penambahan CBAM Block pada setiap residual block.
+    Sangat kuat untuk mengekstraksi fitur kompleks dan beradaptasi terhadap noise/silau.
+    """
+    def __init__(self, input_channel, output_channel=512):
+        super(ResNet_CBAM_FeatureExtractor, self).__init__()
+        self.ConvNet = ResNet(input_channel, output_channel, BasicBlock_CBAM, [1, 2, 5, 3])
+
+    def forward(self, input):
+        return self.ConvNet(input)

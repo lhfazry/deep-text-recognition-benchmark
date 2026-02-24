@@ -140,6 +140,7 @@ def train(opt):
     start_time = time.time()
     best_accuracy = -1
     best_norm_ED = -1
+    patience_counter = 0
     iteration = start_iter
 
     while(True):
@@ -192,6 +193,10 @@ def train(opt):
                 if current_accuracy > best_accuracy:
                     best_accuracy = current_accuracy
                     torch.save(model.state_dict(), f'./saved_models/{opt.exp_name}/best_accuracy.pth')
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+
                 if current_norm_ED > best_norm_ED:
                     best_norm_ED = current_norm_ED
                     torch.save(model.state_dict(), f'./saved_models/{opt.exp_name}/best_norm_ED.pth')
@@ -215,6 +220,13 @@ def train(opt):
                 print(predicted_result_log)
                 log.write(predicted_result_log + '\n')
 
+                if opt.early_stopping_patience > 0 and patience_counter >= opt.early_stopping_patience:
+                    early_stop_log = f'Early stopping at iteration {iteration+1} (patience {opt.early_stopping_patience} reached without improvement).'
+                    print(early_stop_log)
+                    log.write(early_stop_log + '\n')
+                    print('end the training')
+                    sys.exit()
+
         # save model per 1e+5 iter.
         if (iteration + 1) % 1e+5 == 0:
             torch.save(
@@ -236,6 +248,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=192, help='input batch size')
     parser.add_argument('--num_iter', type=int, default=300000, help='number of iterations to train for')
     parser.add_argument('--valInterval', type=int, default=2000, help='Interval between each validation')
+    parser.add_argument('--early_stopping_patience', type=int, default=0, help='number of validations without improvement to wait before early stopping. 0 runs to num_iter.')
     parser.add_argument('--saved_model', default='', help="path to model to continue training")
     parser.add_argument('--FT', action='store_true', help='whether to do fine-tuning')
     parser.add_argument('--adam', action='store_true', help='Whether to use adam (default is Adadelta)')
@@ -261,10 +274,11 @@ if __name__ == '__main__':
     parser.add_argument('--sensitive', action='store_true', help='for sensitive character mode')
     parser.add_argument('--PAD', action='store_true', help='whether to keep ratio then pad for image resize')
     parser.add_argument('--data_filtering_off', action='store_true', help='for data_filtering_off mode')
+    parser.add_argument('--data_augmentation', action='store_true', help='use on-the-fly data augmentation for training')
     """ Model Architecture """
     parser.add_argument('--Transformation', type=str, required=True, help='Transformation stage. None|TPS')
     parser.add_argument('--FeatureExtraction', type=str, required=True,
-                        help='FeatureExtraction stage. VGG|RCNN|ResNet')
+                        help='FeatureExtraction stage. VGG|RCNN|ResNet|CustomAttentionCNN|CustomCBAMCNN|ResNet_CBAM')
     parser.add_argument('--SequenceModeling', type=str, required=True, help='SequenceModeling stage. None|BiLSTM')
     parser.add_argument('--Prediction', type=str, required=True, help='Prediction stage. CTC|Attn')
     parser.add_argument('--num_fiducial', type=int, default=20, help='number of fiducial points of TPS-STN')

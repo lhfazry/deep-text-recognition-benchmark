@@ -46,7 +46,7 @@ def parse_logs(log_path):
 
     return iterations, train_losses, valid_losses, accuracies
 
-def plot_metrics(iterations, train_losses, valid_losses, accuracies, output_dir):
+def plot_metrics(iterations, train_losses, valid_losses, accuracies, output_dir, show_plots=False):
     os.makedirs(output_dir, exist_ok=True)
     
     # Plot Loss
@@ -76,11 +76,15 @@ def plot_metrics(iterations, train_losses, valid_losses, accuracies, output_dir)
         print(f"Accuracy plot saved to {acc_plot_path}")
     else:
         print("Warning: Count of iterations and accuracies don't match. Skipping accuracy plot.")
+    
+    if show_plots:
+        plt.show()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Plot training logs')
     parser.add_argument('--log_path', type=str, required=True, help='Path to log_train.txt')
     parser.add_argument('--output_dir', type=str, default='plots', help='Directory to save plots')
+    parser.add_argument('--show', action='store_true', help='Show plots immediately')
     
     args = parser.parse_args()
     
@@ -88,6 +92,6 @@ if __name__ == "__main__":
     if data:
         iterations, train_losses, valid_losses, accuracies = data
         if iterations:
-            plot_metrics(iterations, train_losses, valid_losses, accuracies, args.output_dir)
+            plot_metrics(iterations, train_losses, valid_losses, accuracies, args.output_dir, show_plots=args.show)
         else:
             print("No data found in log file.")

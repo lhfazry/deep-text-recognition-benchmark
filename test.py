@@ -17,6 +17,8 @@ from model import Model
 import pandas as pd
 from collections import Counter
 import difflib
+import matplotlib.pyplot as plt
+import seaborn as sns
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
@@ -317,6 +319,56 @@ def test(opt):
             print(cm_df)
             cm_df.to_csv(f'./result/{opt.exp_name}/confusion_matrix.csv')
             print(f"\nConfusion matrix saved to ./result/{opt.exp_name}/confusion_matrix.csv")
+
+            # 1. Confusion Matrix Heatmap
+            plt.figure(figsize=(max(10, len(chars) // 2), max(8, len(chars) // 2)))
+            sns.heatmap(cm_df, annot=True, fmt='d', cmap='YlGnBu')
+            plt.title('Character-level Confusion Matrix')
+            plt.xlabel('Predicted')
+            plt.ylabel('Ground Truth')
+            plt.tight_layout()
+            plt.savefig(f'./result/{opt.exp_name}/confusion_matrix.png')
+            plt.close()
+
+            # 2. Confidence Distribution Plot
+            plt.figure(figsize=(10, 6))
+            df_results = pd.DataFrame({
+                'Ground Truth': labels,
+                'Prediction': preds_str,
+                'Confidence': confidence_score_list
+            })
+            # Clean labels/preds for 'Attn'
+            if 'Attn' in opt.Prediction:
+                df_results['Ground Truth'] = df_results['Ground Truth'].apply(lambda x: x[:x.find('[s]')] if '[s]' in x else x)
+                df_results['Prediction'] = df_results['Prediction'].apply(lambda x: x[:x.find('[s]')] if '[s]' in x else x)
+            
+            df_results['Correct'] = df_results['Ground Truth'] == df_results['Prediction']
+            
+            sns.histplot(data=df_results, x='Confidence', hue='Correct', multiple='stack', bins=20)
+            plt.title('Confidence Score Distribution')
+            plt.savefig(f'./result/{opt.exp_name}/confidence_distribution.png')
+            plt.close()
+
+            # 3. Accuracy Per Character
+            char_correct = Counter()
+            char_total = Counter()
+            for char in chars:
+                char_total[char] = cm_df.loc[char].sum()
+                char_correct[char] = cm_df.loc[char, char]
+            
+            char_acc = {c: (char_correct[c] / char_total[c] if char_total[c] > 0 else 0) for c in chars}
+            acc_series = pd.Series(char_acc).sort_values(ascending=False)
+            
+            plt.figure(figsize=(12, 6))
+            acc_series.plot(kind='bar', color='skyblue')
+            plt.title('Accuracy Per Character')
+            plt.ylabel('Accuracy')
+            plt.ylim(0, 1.05)
+            plt.tight_layout()
+            plt.savefig(f'./result/{opt.exp_name}/character_accuracy.png')
+            plt.close()
+            
+            print(f"Visual plots saved to ./result/{opt.exp_name}/")
 
             log.close()
 

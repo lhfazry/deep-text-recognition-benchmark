@@ -14,6 +14,9 @@ from nltk.metrics.distance import edit_distance
 from utils import CTCLabelConverter, AttnLabelConverter, Averager
 from dataset import hierarchical_dataset, AlignCollate
 from model import Model
+import pandas as pd
+from collections import Counter
+import difflib
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
@@ -85,6 +88,9 @@ def validation(model, criterion, evaluation_loader, converter, opt):
     length_of_data = 0
     infer_time = 0
     valid_loss_avg = Averager()
+    all_preds_str = []
+    all_confidence_score_list = []
+    all_labels = []
 
     for i, (image_tensors, labels) in enumerate(evaluation_loader):
         batch_size = image_tensors.size(0)
@@ -180,11 +186,15 @@ def validation(model, criterion, evaluation_loader, converter, opt):
                 confidence_score = 0  # for empty pred case, when prune after "end of sentence" token ([s])
             confidence_score_list.append(confidence_score)
             # print(pred, gt, pred==gt, confidence_score)
+        
+        all_preds_str.extend(preds_str)
+        all_confidence_score_list.extend(confidence_score_list)
+        all_labels.extend(labels)
 
     accuracy = n_correct / float(length_of_data) * 100
     norm_ED = norm_ED / float(length_of_data)  # ICDAR2019 Normalized Edit Distance
 
-    return valid_loss_avg.val(), accuracy, norm_ED, preds_str, confidence_score_list, labels, infer_time, length_of_data
+    return valid_loss_avg.val(), accuracy, norm_ED, all_preds_str, all_confidence_score_list, all_labels, infer_time, length_of_data
 
 
 def test(opt):
@@ -233,11 +243,81 @@ def test(opt):
                 shuffle=False,
                 num_workers=int(opt.workers),
                 collate_fn=AlignCollate_evaluation, pin_memory=True)
-            _, accuracy_by_best_model, _, _, _, _, _, _ = validation(
+            loss, accuracy_by_best_model, norm_ED, preds_str, confidence_score_list, labels, _, _ = validation(
                 model, criterion, evaluation_loader, converter, opt)
+            
             log.write(eval_data_log)
-            print(f'{accuracy_by_best_model:0.3f}')
+            print(f'Final Accuracy: {accuracy_by_best_model:0.3f}')
+            print(f'Final Loss: {loss:0.5f}')
+            print(f'Normalized Edit Distance: {norm_ED:0.3f}')
             log.write(f'{accuracy_by_best_model:0.3f}\n')
+
+            # Show some predicted results
+            dashed_line = '-' * 100
+            head = f'{"Ground Truth":25s} | {"Prediction":25s} | Confidence Score & T/F'
+            print(dashed_line)
+            print(head)
+            print(dashed_line)
+            for gt, pred, confidence in zip(labels[:20], preds_str[:20], confidence_score_list[:20]):
+                if 'Attn' in opt.Prediction:
+                    gt = gt[:gt.find('[s]')]
+                    pred = pred[:pred.find('[s]')]
+                print(f'{gt:25s} | {pred:25s} | {confidence:0.4f}\t{str(pred == gt)}')
+            print(dashed_line)
+
+            # Confusion Matrix logic
+            print("\nCharacter-level Confusion Matrix:")
+            chars = sorted(list(opt.character))
+            confusion = {c: Counter() for c in chars}
+            
+            for gt, pred in zip(labels, preds_str):
+                if 'Attn' in opt.Prediction:
+                    gt = gt[:gt.find('[s]')]
+                    pred = pred[:pred.find('[s]')]
+                
+                matcher = difflib.SequenceMatcher(None, gt, pred)
+                for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                    if tag == 'equal':
+                        for i in range(i1, i2):
+                            char = gt[i]
+                            if char in confusion:
+                                confusion[char][char] += 1
+                    elif tag == 'replace':
+                        # Simplistic replacement mapping (1-to-1 if possible)
+                        g_sub = gt[i1:i2]
+                        p_sub = pred[j1:j2]
+                        for g, p in zip(g_sub, p_sub):
+                            if g in confusion and p in chars:
+                                confusion[g][p] += 1
+                        # Handle leftover chars if lengths differ in replacement block
+                        if len(g_sub) > len(p_sub):
+                            for g in g_sub[len(p_sub):]:
+                                if g in confusion: confusion[g]['[DELETE]'] += 1
+                        elif len(p_sub) > len(g_sub):
+                            # Insertions are harder to represent in a GT-based confusion matrix
+                            pass
+                    elif tag == 'delete':
+                        for i in range(i1, i2):
+                            char = gt[i]
+                            if char in confusion:
+                                confusion[char]['[DELETE]'] += 1
+                    elif tag == 'insert':
+                        # Insertions not easily mapped to a specific GT character
+                        pass
+            
+            # Convert to DataFrame for pretty printing
+            cm_df = pd.DataFrame(confusion).fillna(0).astype(int).T
+            # Ensure all chars are present in columns too
+            for c in chars:
+                if c not in cm_df.columns:
+                    cm_df[c] = 0
+            # Order columns same as index
+            cols = chars + ([ '[DELETE]'] if '[DELETE]' in cm_df.columns else [])
+            cm_df = cm_df[cols]
+            print(cm_df)
+            cm_df.to_csv(f'./result/{opt.exp_name}/confusion_matrix.csv')
+            print(f"\nConfusion matrix saved to ./result/{opt.exp_name}/confusion_matrix.csv")
+
             log.close()
 
 

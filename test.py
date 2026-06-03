@@ -245,13 +245,22 @@ def test(opt):
                 shuffle=False,
                 num_workers=int(opt.workers),
                 collate_fn=AlignCollate_evaluation, pin_memory=True)
-            loss, accuracy_by_best_model, norm_ED, preds_str, confidence_score_list, labels, _, _ = validation(
+            loss, accuracy_by_best_model, norm_ED, preds_str, confidence_score_list, labels, infer_time, length_of_data = validation(
                 model, criterion, evaluation_loader, converter, opt)
             
+            avg_infer_time = (infer_time / length_of_data) * 1000 if length_of_data > 0 else 0 # ms per image
+            fps = length_of_data / infer_time if infer_time > 0 else 0
+            avg_confidence = sum(confidence_score_list) / len(confidence_score_list) if confidence_score_list else 0
+
             log.write(eval_data_log)
+            print(f'Total Data: {length_of_data}')
             print(f'Final Accuracy: {accuracy_by_best_model:0.3f}')
             print(f'Final Loss: {loss:0.5f}')
             print(f'Normalized Edit Distance: {norm_ED:0.3f}')
+            print(f'Total Prediction Time: {infer_time:0.3f} s')
+            print(f'Average Prediction Time per Image: {avg_infer_time:0.3f} ms')
+            print(f'FPS: {fps:0.2f}')
+            print(f'Average Confidence Score: {avg_confidence:0.4f}')
             log.write(f'{accuracy_by_best_model:0.3f}\n')
 
             # Show some predicted results

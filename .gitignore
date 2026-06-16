@@ -8,6 +8,7 @@
 *.sh
 *.txt
 *.ipynb
+!notebooks/*.ipynb
 *.zip
 *.eps
 *.pdf

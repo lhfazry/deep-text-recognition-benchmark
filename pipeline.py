@@ -93,10 +93,74 @@ class KilometerPipeline:
                 
         return pred, confidence_score
 
-    def process(self, image_path, padding=8, conf_threshold=0.25, save_crops_dir=None):
+    @staticmethod
+    def draw_predictions(img, output):
+        """
+        Draw bounding boxes and predicted text on the image with color coding.
+        
+        - 'meter' boxes are drawn in GREEN
+        - 'nomor_meter' boxes are drawn in ORANGE (BGR)
+        
+        Returns the annotated image as a numpy array (BGR).
+        """
+        img_copy = img.copy()
+        colors = {
+            'meter': (0, 200, 0),
+            'nomor_meter': (0, 165, 255)
+        }
+
+        for category in ['meter', 'nomor_meter']:
+            if output[category]['box'] is None:
+                continue
+            x1, y1, x2, y2 = output[category]['box']
+            text = output[category]['text'] or 'N/A'
+            conf = output[category]['conf']
+            color = colors[category]
+
+            cv2.rectangle(img_copy, (x1, y1), (x2, y2), color, 2)
+
+            label = f"{category}: {text} ({conf:.2f})"
+            font_scale = 0.5
+            thickness = 1
+            (label_w, label_h), baseline = cv2.getTextSize(
+                label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
+            )
+
+            text_x = x1
+            if y1 - label_h - 6 > 0:
+                text_y = y1 - 4
+                cv2.rectangle(img_copy,
+                              (text_x, text_y - label_h - 2),
+                              (text_x + label_w, text_y + 2),
+                              color, -1)
+            else:
+                text_y = y2 + label_h + 6
+                cv2.rectangle(img_copy,
+                              (text_x, text_y - label_h - 2),
+                              (text_x + label_w, text_y + 2),
+                              color, -1)
+
+            cv2.putText(img_copy, label, (text_x, text_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale,
+                        (255, 255, 255), thickness)
+
+        return img_copy
+
+    def process(self, image_path, padding=8, conf_threshold=0.25, save_crops_dir=None, output_dir=None):
         """
         Processes a single kilometer photo.
-        Returns a dictionary containing 'meter', 'nomor_meter', and their confidence scores.
+
+        Args:
+            image_path: Path to the input image.
+            padding: Padding in pixels around detected bounding boxes before OCR.
+            conf_threshold: YOLO confidence threshold.
+            save_crops_dir: Optional directory to save cropped text regions.
+            output_dir: Optional directory to save the annotated image
+                        (with bounding boxes and predicted text drawn on it).
+
+        Returns:
+            dict with keys 'meter', 'nomor_meter' (each containing 'text', 'conf', 'box'),
+            and 'detected_boxes_count'.
         """
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image not found at: {image_path}")
@@ -182,15 +246,29 @@ class KilometerPipeline:
                 'box': [x1, y1, x2, y2]
             }
             
+        # 5. Save annotated image (with bounding boxes and predicted text) if output_dir is provided
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            annotated = self.draw_predictions(img, output)
+            base_name = os.path.splitext(os.path.basename(image_path))[0]
+            out_path = os.path.join(output_dir, f"{base_name}_annotated.jpg")
+            cv2.imwrite(out_path, annotated)
+            print(f"[*] Saved annotated image to {out_path}")
+            
         return output
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Full Pipeline Kilometer Detector (YOLO + OCR)")
     # Paths
-    parser.add_argument('--image_path', required=True, help='Path to the original kilometer photo')
+    parser.add_argument('--image_path', required=True,
+                        help='Path to a kilometer photo or a directory containing multiple photos')
     parser.add_argument('--yolo_model', default='best.pt', help='Path to the YOLO model (.pt) weight')
     parser.add_argument('--saved_model', required=True, help="Path to the trained OCR model (.pth) weight")
     parser.add_argument('--save_crops_dir', default=None, help="Directory to save cropped boxes (optional)")
+    parser.add_argument('--output_dir', default=None,
+                        help='Directory to save annotated images (with bboxes and text drawn). '
+                             'For single image input, defaults to the same directory as the input image. '
+                             'For directory input, defaults to <dirname>_output/')
     
     # OCR Options (configured to match the model architecture)
     parser.add_argument('--batch_max_length', type=int, default=25, help='maximum-label-length')
@@ -232,31 +310,90 @@ if __name__ == '__main__':
         ocr_model_path=opt.saved_model,
         ocr_opt=opt
     )
-    
-    # Process Image
-    try:
+
+    # Determine if input is a directory or single file
+    IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif')
+
+    def process_single_image(image_path, output_dir):
+        """Helper to process one image and print results."""
         res = pipeline.process(
-            image_path=opt.image_path,
+            image_path=image_path,
             padding=opt.padding,
             conf_threshold=opt.yolo_conf,
-            save_crops_dir=opt.save_crops_dir
+            save_crops_dir=opt.save_crops_dir,
+            output_dir=output_dir
         )
-        
-        # Print Results
-        print("\n" + "="*50)
-        print(f"Image Path     : {opt.image_path}")
+
+        print("\n" + "=" * 50)
+        print(f"Image Path     : {image_path}")
         print(f"Boxes Detected : {res['detected_boxes_count']}")
-        print("-"*50)
-        
+        print("-" * 50)
+
         meter_val = res['meter']['text']
         meter_conf = res['meter']['conf']
         print(f"Stand Meter    : {meter_val if meter_val else 'N/A'} (Conf: {meter_conf:.4f})")
-        
+
         no_meter_val = res['nomor_meter']['text']
         no_meter_conf = res['nomor_meter']['conf']
         print(f"Nomor Meter    : {no_meter_val if no_meter_val else 'N/A'} (Conf: {no_meter_conf:.4f})")
-        print("="*50 + "\n")
-        
+        print("=" * 50 + "\n")
+        return res
+
+    try:
+        if os.path.isdir(opt.image_path):
+            # --- Batch processing: directory input ---
+            input_dir = opt.image_path.rstrip('/')
+            output_dir = input_dir + '_output'
+
+            image_files = sorted([
+                f for f in os.listdir(input_dir)
+                if f.lower().endswith(IMAGE_EXTENSIONS)
+            ])
+
+            if not image_files:
+                print(f"[Warning] No image files found in directory: {input_dir}")
+                exit(1)
+
+            print(f"[*] Found {len(image_files)} image(s) in '{input_dir}'")
+            print(f"[*] Annotated images will be saved to '{output_dir}'\n")
+            os.makedirs(output_dir, exist_ok=True)
+
+            summary = []
+            for img_file in image_files:
+                img_path = os.path.join(input_dir, img_file)
+                print(f"[Processing] {img_file} ...")
+                try:
+                    res = process_single_image(img_path, output_dir)
+                    summary.append({
+                        'file': img_file,
+                        'meter': res['meter']['text'] or 'N/A',
+                        'meter_conf': res['meter']['conf'],
+                        'nomor_meter': res['nomor_meter']['text'] or 'N/A',
+                        'nomor_meter_conf': res['nomor_meter']['conf'],
+                    })
+                except Exception as e:
+                    print(f"[Error] Failed to process {img_file}: {e}")
+
+            # Print summary table
+            print("=" * 70)
+            print(f"{'File':30s} {'Stand Meter':20s} {'Nomor Meter':20s}")
+            print("=" * 70)
+            for s in summary:
+                m = f"{s['meter']} ({s['meter_conf']:.2f})"
+                nm = f"{s['nomor_meter']} ({s['nomor_meter_conf']:.2f})"
+                print(f"{s['file']:30s} {m:20s} {nm:20s}")
+            print("=" * 70)
+            print(f"Processed {len(summary)} image(s). Annotated images saved to: {output_dir}")
+
+        else:
+            # --- Single image processing ---
+            if opt.output_dir:
+                output_dir = opt.output_dir
+            else:
+                output_dir = os.path.dirname(os.path.abspath(opt.image_path))
+
+            process_single_image(opt.image_path, output_dir)
+
     except Exception as e:
         print(f"[Error] Failed to process image: {e}")
         import traceback

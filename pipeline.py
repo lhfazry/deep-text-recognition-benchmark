@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from ultralytics import YOLO
+import csv
 
 from utils import CTCLabelConverter, AttnLabelConverter
 from dataset import AlignCollate
@@ -293,6 +294,8 @@ if __name__ == '__main__':
     # YOLO Options
     parser.add_argument('--yolo_conf', type=float, default=0.25, help='YOLO confidence threshold')
     parser.add_argument('--padding', type=int, default=8, help='Padding for cropping text boxes')
+    parser.add_argument('--gt_csv', default=None,
+                        help='Path to ground truth CSV with columns: name file, stan meter, nomor meter')
 
     opt = parser.parse_args()
 
@@ -314,8 +317,40 @@ if __name__ == '__main__':
     # Determine if input is a directory or single file
     IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif')
 
-    def process_single_image(image_path, output_dir):
-        """Helper to process one image and print results."""
+    def load_ground_truth(csv_path):
+        """Load ground truth from CSV file.
+
+        Expected CSV columns: name file, stan meter, nomor meter
+        Returns: dict mapping filename -> {'stan_meter': str, 'nomor_meter': str}
+        """
+        gt_dict = {}
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row_num, row in enumerate(reader, 2):  # start from 2 for header row
+                filename = os.path.basename(row.get('name file', '').strip())
+                stan = row.get('stan meter', '').strip()
+                nomor = row.get('nomor meter', '').strip()
+                if not filename:
+                    print(f"[Warning] CSV row {row_num}: empty filename, skipping")
+                    continue
+                gt_dict[filename] = {'stan_meter': stan, 'nomor_meter': nomor}
+        return gt_dict
+
+    # Load ground truth if provided
+    gt_dict = {}
+    if opt.gt_csv:
+        if not os.path.exists(opt.gt_csv):
+            print(f"[Error] Ground truth CSV '{opt.gt_csv}' does not exist.")
+            exit(1)
+        gt_dict = load_ground_truth(opt.gt_csv)
+        print(f"[*] Loaded ground truth for {len(gt_dict)} image(s) from '{opt.gt_csv}'")
+
+    def process_single_image(image_path, output_dir, gt_dict=None):
+        """Helper to process one image, print results, and optionally compare with ground truth.
+
+        Returns:
+            tuple: (result_dict, metrics_dict or None)
+        """
         res = pipeline.process(
             image_path=image_path,
             padding=opt.padding,
@@ -323,6 +358,8 @@ if __name__ == '__main__':
             save_crops_dir=opt.save_crops_dir,
             output_dir=output_dir
         )
+
+        base_name = os.path.basename(image_path)
 
         print("\n" + "=" * 50)
         print(f"Image Path     : {image_path}")
@@ -336,8 +373,47 @@ if __name__ == '__main__':
         no_meter_val = res['nomor_meter']['text']
         no_meter_conf = res['nomor_meter']['conf']
         print(f"Nomor Meter    : {no_meter_val if no_meter_val else 'N/A'} (Conf: {no_meter_conf:.4f})")
+
+        # Ground truth comparison
+        result_metrics = None
+        if gt_dict and base_name in gt_dict:
+            from nltk.metrics.distance import edit_distance
+
+            gt = gt_dict[base_name]
+            gt_meter = gt['stan_meter']
+            gt_nomor = gt['nomor_meter']
+
+            pred_meter = res['meter']['text'] or ''
+            pred_nomor = res['nomor_meter']['text'] or ''
+
+            meter_match = pred_meter == gt_meter
+            nomor_match = pred_nomor == gt_nomor
+            meter_ed = edit_distance(pred_meter, gt_meter)
+            nomor_ed = edit_distance(pred_nomor, gt_nomor)
+
+            print("-" * 50)
+            print(f"GT Stand Meter : {gt_meter}")
+            print(f"GT Nomor Meter : {gt_nomor}")
+            print(f"Meter Match    : {'✓' if meter_match else '✗'} (Edit Dist: {meter_ed})")
+            print(f"Nomor Match    : {'✓' if nomor_match else '✗'} (Edit Dist: {nomor_ed})")
+
+            result_metrics = {
+                'file': base_name,
+                'stan_meter_gt': gt_meter,
+                'stan_meter_pred': pred_meter,
+                'nomor_meter_gt': gt_nomor,
+                'nomor_meter_pred': pred_nomor,
+                'meter_match': meter_match,
+                'nomor_match': nomor_match,
+                'meter_ed': meter_ed,
+                'nomor_ed': nomor_ed,
+                'both_correct': meter_match and nomor_match,
+            }
+        elif gt_dict is not None:
+            print(f"[Warning] '{base_name}' not found in ground truth CSV")
+
         print("=" * 50 + "\n")
-        return res
+        return res, result_metrics
 
     try:
         if os.path.isdir(opt.image_path):
@@ -359,11 +435,12 @@ if __name__ == '__main__':
             os.makedirs(output_dir, exist_ok=True)
 
             summary = []
+            all_metrics = []
             for img_file in image_files:
                 img_path = os.path.join(input_dir, img_file)
                 print(f"[Processing] {img_file} ...")
                 try:
-                    res = process_single_image(img_path, output_dir)
+                    res, metrics = process_single_image(img_path, output_dir, gt_dict)
                     summary.append({
                         'file': img_file,
                         'meter': res['meter']['text'] or 'N/A',
@@ -371,6 +448,8 @@ if __name__ == '__main__':
                         'nomor_meter': res['nomor_meter']['text'] or 'N/A',
                         'nomor_meter_conf': res['nomor_meter']['conf'],
                     })
+                    if metrics:
+                        all_metrics.append(metrics)
                 except Exception as e:
                     print(f"[Error] Failed to process {img_file}: {e}")
 
@@ -385,6 +464,26 @@ if __name__ == '__main__':
             print("=" * 70)
             print(f"Processed {len(summary)} image(s). Annotated images saved to: {output_dir}")
 
+            # Print metrics summary if ground truth was provided
+            if all_metrics:
+                n = len(all_metrics)
+                meter_correct = sum(1 for m in all_metrics if m['meter_match'])
+                nomor_correct = sum(1 for m in all_metrics if m['nomor_match'])
+                both_correct = sum(1 for m in all_metrics if m['both_correct'])
+                avg_meter_ed = sum(m['meter_ed'] for m in all_metrics) / n
+                avg_nomor_ed = sum(m['nomor_ed'] for m in all_metrics) / n
+
+                print("\n" + "=" * 60)
+                print("           METRICS SUMMARY")
+                print("=" * 60)
+                print(f"Total Images with GT    : {n}")
+                print(f"Stand Meter Accuracy    : {meter_correct/n*100:.1f}% ({meter_correct}/{n})")
+                print(f"Nomor Meter Accuracy    : {nomor_correct/n*100:.1f}% ({nomor_correct}/{n})")
+                print(f"Overall Accuracy        : {both_correct/n*100:.1f}% ({both_correct}/{n})")
+                print(f"Avg Meter Edit Distance : {avg_meter_ed:.2f}")
+                print(f"Avg Nomor Edit Distance : {avg_nomor_ed:.2f}")
+                print("=" * 60 + "\n")
+
         else:
             # --- Single image processing ---
             if opt.output_dir:
@@ -392,7 +491,7 @@ if __name__ == '__main__':
             else:
                 output_dir = os.path.dirname(os.path.abspath(opt.image_path))
 
-            process_single_image(opt.image_path, output_dir)
+            process_single_image(opt.image_path, output_dir, gt_dict)
 
     except Exception as e:
         print(f"[Error] Failed to process image: {e}")

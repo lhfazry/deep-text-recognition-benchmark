@@ -295,7 +295,7 @@ if __name__ == '__main__':
     parser.add_argument('--yolo_conf', type=float, default=0.25, help='YOLO confidence threshold')
     parser.add_argument('--padding', type=int, default=8, help='Padding for cropping text boxes')
     parser.add_argument('--gt_csv', default=None,
-                        help='Path to ground truth CSV with columns: name file, stan meter, nomor meter')
+                        help='Path to ground truth CSV with columns: Nama file, Stand Meter, Nomor Meter')
 
     opt = parser.parse_args()
 
@@ -320,16 +320,16 @@ if __name__ == '__main__':
     def load_ground_truth(csv_path):
         """Load ground truth from CSV file.
 
-        Expected CSV columns: name file, stan meter, nomor meter
+        Expected CSV columns: Nama file, Stand Meter, Nomor Meter
         Returns: dict mapping filename -> {'stan_meter': str, 'nomor_meter': str}
         """
         gt_dict = {}
         with open(csv_path, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row_num, row in enumerate(reader, 2):  # start from 2 for header row
-                filename = os.path.basename(row.get('name file', '').strip())
-                stan = row.get('stan meter', '').strip()
-                nomor = row.get('nomor meter', '').strip()
+                filename = os.path.basename(row.get('Nama file', '').strip())
+                stan = row.get('Stand Meter', '').strip()
+                nomor = row.get('Nomor Meter', '').strip()
                 if not filename:
                     print(f"[Warning] CSV row {row_num}: empty filename, skipping")
                     continue

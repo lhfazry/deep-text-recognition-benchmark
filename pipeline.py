@@ -326,7 +326,11 @@ if __name__ == '__main__':
         """
         gt_dict = {}
         with open(csv_path, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
+            # Auto-detect delimiter: use ; if found in header, else default to ,
+            first_line = f.readline()
+            delimiter = ';' if ';' in first_line else ','
+            f.seek(0)
+            reader = csv.DictReader(f, delimiter=delimiter)
             for row_num, row in enumerate(reader, 2):  # start from 2 for header row
                 filename = os.path.basename(row.get('Nama file', '').strip())
                 stan = row.get('Stand Meter', '').strip()

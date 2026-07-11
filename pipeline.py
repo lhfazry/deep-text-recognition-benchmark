@@ -321,6 +321,7 @@ if __name__ == '__main__':
         """Load ground truth from CSV file.
 
         Expected CSV columns: Nama file, Stand Meter, Nomor Meter
+        If a filename has no extension, .jpg is assumed.
         Returns: dict mapping filename -> {'stan_meter': str, 'nomor_meter': str}
         """
         gt_dict = {}
@@ -333,8 +334,25 @@ if __name__ == '__main__':
                 if not filename:
                     print(f"[Warning] CSV row {row_num}: empty filename, skipping")
                     continue
+                # If CSV filename has no extension, assume .jpg
+                if '.' not in filename:
+                    filename = filename + '.jpg'
                 gt_dict[filename] = {'stan_meter': stan, 'nomor_meter': nomor}
         return gt_dict
+
+    def _lookup_gt(gt_dict, base_name):
+        """Look up filename in gt_dict with flexible extension matching.
+        
+        Tries exact match first, then falls back to matching without extension
+        (handles cases where CSV has .jpg but file is .png, or vice versa).
+        """
+        if not gt_dict:
+            return None
+        if base_name in gt_dict:
+            return gt_dict[base_name]
+        # Fallback: try stripping extension
+        name_no_ext = os.path.splitext(base_name)[0]
+        return gt_dict.get(name_no_ext)
 
     # Load ground truth if provided
     gt_dict = {}
@@ -376,12 +394,12 @@ if __name__ == '__main__':
 
         # Ground truth comparison
         result_metrics = None
-        if gt_dict and base_name in gt_dict:
+        gt_entry = _lookup_gt(gt_dict, base_name)
+        if gt_entry is not None:
             from nltk.metrics.distance import edit_distance
 
-            gt = gt_dict[base_name]
-            gt_meter = gt['stan_meter']
-            gt_nomor = gt['nomor_meter']
+            gt_meter = gt_entry['stan_meter']
+            gt_nomor = gt_entry['nomor_meter']
 
             pred_meter = res['meter']['text'] or ''
             pred_nomor = res['nomor_meter']['text'] or ''
